@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import "./App.css";
 
-const API = "http://localhost:3000";
+const API = "";
 
 function App() {
   const [students, setStudents] = useState([]);
