@@ -1,0 +1,28 @@
+
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "services": {
+    "attendance-backend": {
+      "root": "attendance-backend",
+      "framework": "express"
+    },
+    "attendance-frontend": {
+      "root": "attendance-frontend/attendance-frontend",
+      "framework": "vite"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": {
+        "service": "attendance-backend"
+      }
+    },
+    {
+      "source": "/(.*)",
+      "destination": {
+        "service": "attendance-frontend"
+      }
+    }
+  ]
+}
