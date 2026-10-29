@@ -4,69 +4,63 @@ const mongoose = require("mongoose");
 const cors = require("cors");
 
 const app = express();
-const PORT = 3000;
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// Connect to MongoDB
-mongoose
-  .connect("mongodb://127.0.0.1:27017/attendanceDB")
-  .then(() => console.log("MongoDB connected successfully!"))
-  .catch((error) => console.log("MongoDB error:", error.message));
+// ================= MONGODB CONNECTION =================
 
-// Get today's date in local time (YYYY-MM-DD)
-function getTodayDate() {
-  const today = new Date();
-  const year = today.getFullYear();
-  const month = String(today.getMonth() + 1).padStart(2, "0");
-  const day = String(today.getDate()).padStart(2, "0");
+const MONGODB_URI =
+  process.env.MONGODB_URI ||
+  (process.env.NODE_ENV !== "production"
+    ? "mongodb://127.0.0.1:27017/attendanceDB"
+    : "");
 
-  return `${year}-${month}-${day}`;
+let dbPromise = null;
+
+async function connectDB() {
+  if (mongoose.connection.readyState === 1) {
+    return;
+  }
+
+  if (!MONGODB_URI) {
+    throw new Error("MONGODB_URI is missing in Vercel Environment Variables.");
+  }
+
+  if (!dbPromise) {
+    dbPromise = mongoose
+      .connect(MONGODB_URI, {
+        serverSelectionTimeoutMS: 10000,
+      })
+      .then(() => {
+        console.log("MongoDB connected successfully!");
+      })
+      .catch((err) => {
+        dbPromise = null;
+        throw err;
+      });
+  }
+
+  await dbPromise;
 }
 
-// Student Schema
+// ================= DATABASE SCHEMAS =================
+
 const studentSchema = new mongoose.Schema(
   {
-    studentId: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-    name: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-    course: {
-      type: String,
-      default: "",
-    },
-    year: {
-      type: String,
-      default: "",
-    },
+    studentId: { type: String, required: true, trim: true },
+    name: { type: String, required: true, trim: true },
+    course: { type: String, default: "" },
+    year: { type: String, default: "" },
   },
   { timestamps: true }
 );
 
-// Attendance Schema
 const attendanceSchema = new mongoose.Schema(
   {
-    studentId: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-    name: {
-      type: String,
-      default: "",
-    },
-    date: {
-      type: String,
-      required: true,
-    },
+    studentId: { type: String, required: true, trim: true },
+    name: { type: String, default: "" },
+    date: { type: String, required: true },
     status: {
       type: String,
       enum: ["Present", "Absent", "Late"],
@@ -76,48 +70,71 @@ const attendanceSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-const Student = mongoose.model("Student", studentSchema);
-const Attendance = mongoose.model("Attendance", attendanceSchema);
+const Student =
+  mongoose.models.Student ||
+  mongoose.model("Student", studentSchema);
 
-// Test Route
+const Attendance =
+  mongoose.models.Attendance ||
+  mongoose.model("Attendance", attendanceSchema);
+
+function getToday() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// ================= TEST ROUTE =================
+
 app.get("/", (req, res) => {
-  res.send("Class Attendance System API is running!");
+  res.json({
+    message: "Class Attendance System API is running!",
+  });
 });
 
-// ===============================
-// STUDENT ROUTES
-// ===============================
+// Connect to the database before handling API requests.
+app.use("/api", async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    console.error("MongoDB connection error:", err.message);
+    res.status(503).json({
+      message: "Database connection failed. Check MONGODB_URI in Vercel.",
+    });
+  }
+});
+
+// ================= STUDENTS =================
 
 // Get all students
 app.get("/api/students", async (req, res) => {
   try {
     const students = await Student.find().sort({ createdAt: -1 });
     res.json(students);
-  } catch (error) {
-    res.status(500).json({ message: "Failed to get students." });
+  } catch (err) {
+    console.error("Get students:", err.message);
+    res.status(500).json({ message: err.message });
   }
 });
 
 // Search students
 app.get("/api/students/search", async (req, res) => {
   try {
-    const search = String(req.query.q || "").trim();
-
-    const students = await Student.find({
+    const q = String(req.query.q || "");
+    const result = await Student.find({
       $or: [
-        { studentId: { $regex: search, $options: "i" } },
-        { name: { $regex: search, $options: "i" } },
-        { course: { $regex: search, $options: "i" } },
+        { studentId: { $regex: q, $options: "i" } },
+        { name: { $regex: q, $options: "i" } },
+        { course: { $regex: q, $options: "i" } },
       ],
-    }).sort({ name: 1 });
-
-    res.json(students);
-  } catch (error) {
-    res.status(500).json({ message: "Student search failed." });
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
   }
 });
 
-// Add a student
+// Add student
 app.post("/api/students", async (req, res) => {
   try {
     const { studentId, name, course, year } = req.body;
@@ -128,31 +145,30 @@ app.post("/api/students", async (req, res) => {
       });
     }
 
-    const existingStudent = await Student.findOne({
-      studentId: String(studentId).trim(),
-    });
+    const id = String(studentId).trim();
+    const exists = await Student.findOne({ studentId: id });
 
-    if (existingStudent) {
+    if (exists) {
       return res.status(409).json({
         message: "This Student ID already exists.",
       });
     }
 
     const student = await Student.create({
-      studentId: String(studentId).trim(),
+      studentId: id,
       name: String(name).trim(),
       course: course || "",
       year: year || "",
     });
 
     res.status(201).json(student);
-  } catch (error) {
-    console.error("Add student error:", error);
-    res.status(500).json({ message: "Failed to add student." });
+  } catch (err) {
+    console.error("Add student:", err.message);
+    res.status(500).json({ message: err.message });
   }
 });
 
-// Get one student by MongoDB ID
+// Get one student
 app.get("/api/students/:id", async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) {
@@ -166,12 +182,12 @@ app.get("/api/students/:id", async (req, res) => {
     }
 
     res.json(student);
-  } catch (error) {
-    res.status(500).json({ message: "Failed to get student." });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
   }
 });
 
-// Delete student and their attendance records
+// Delete student and attendance records
 app.delete("/api/students/:id", async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) {
@@ -187,30 +203,24 @@ app.delete("/api/students/:id", async (req, res) => {
     await Attendance.deleteMany({ studentId: student.studentId });
     await Student.findByIdAndDelete(req.params.id);
 
-    res.json({
-      message: "Student and related attendance records deleted successfully.",
-    });
-  } catch (error) {
-    console.error("Delete student error:", error);
-    res.status(500).json({ message: "Failed to delete student." });
+    res.json({ message: "Student deleted successfully." });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
   }
 });
 
-// ===============================
-// ATTENDANCE ROUTES
-// ===============================
+// ================= ATTENDANCE =================
 
-// Get all attendance records
+// Get attendance records
 app.get("/api/attendance", async (req, res) => {
   try {
     const records = await Attendance.find().sort({
       date: -1,
       createdAt: -1,
     });
-
     res.json(records);
-  } catch (error) {
-    res.status(500).json({ message: "Failed to get attendance records." });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
   }
 });
 
@@ -227,7 +237,7 @@ app.post("/api/attendance", async (req, res) => {
 
     if (!["Present", "Absent", "Late"].includes(status)) {
       return res.status(400).json({
-        message: "Status must be Present, Absent, or Late.",
+        message: "Invalid attendance status.",
       });
     }
 
@@ -236,9 +246,7 @@ app.post("/api/attendance", async (req, res) => {
     });
 
     if (!student) {
-      return res.status(404).json({
-        message: "Student not found. Please add the student first.",
-      });
+      return res.status(404).json({ message: "Student not found." });
     }
 
     const record = await Attendance.create({
@@ -249,9 +257,9 @@ app.post("/api/attendance", async (req, res) => {
     });
 
     res.status(201).json(record);
-  } catch (error) {
-    console.error("Record attendance error:", error);
-    res.status(500).json({ message: "Failed to record attendance." });
+  } catch (err) {
+    console.error("Record attendance:", err.message);
+    res.status(500).json({ message: err.message });
   }
 });
 
@@ -259,24 +267,25 @@ app.post("/api/attendance", async (req, res) => {
 app.put("/api/attendance/:id", async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) {
-      return res.status(400).json({ message: "Invalid attendance ID." });
-    }
-
-    const { status, date } = req.body;
-
-    if (
-      status !== undefined &&
-      !["Present", "Absent", "Late"].includes(status)
-    ) {
       return res.status(400).json({
-        message: "Status must be Present, Absent, or Late.",
+        message: "Invalid attendance ID.",
       });
     }
 
     const updates = {};
 
-    if (status !== undefined) updates.status = status;
-    if (date !== undefined) updates.date = String(date);
+    if (req.body.status !== undefined) {
+      if (!["Present", "Absent", "Late"].includes(req.body.status)) {
+        return res.status(400).json({
+          message: "Invalid attendance status.",
+        });
+      }
+      updates.status = req.body.status;
+    }
+
+    if (req.body.date !== undefined) {
+      updates.date = String(req.body.date);
+    }
 
     const record = await Attendance.findByIdAndUpdate(
       req.params.id,
@@ -291,17 +300,18 @@ app.put("/api/attendance/:id", async (req, res) => {
     }
 
     res.json(record);
-  } catch (error) {
-    console.error("Edit attendance error:", error);
-    res.status(500).json({ message: "Failed to update attendance." });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
   }
 });
 
-// Delete an attendance record
+// Delete attendance record
 app.delete("/api/attendance/:id", async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) {
-      return res.status(400).json({ message: "Invalid attendance ID." });
+      return res.status(400).json({
+        message: "Invalid attendance ID.",
+      });
     }
 
     const record = await Attendance.findByIdAndDelete(req.params.id);
@@ -312,307 +322,226 @@ app.delete("/api/attendance/:id", async (req, res) => {
       });
     }
 
-    res.json({ message: "Attendance record deleted successfully." });
-  } catch (error) {
-    res.status(500).json({
-      message: "Failed to delete attendance record.",
-    });
+    res.json({ message: "Attendance record deleted." });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
   }
 });
 
-// ===============================
-// AI SMART ATTENDANCE ANALYSIS
-// No API key required
-// ===============================
+// ================= AI SMART ANALYSIS =================
 
 app.get("/api/ai/analysis", async (req, res) => {
   try {
     const students = await Student.find();
     const records = await Attendance.find();
+    const today = getToday();
 
-    const totalStudents = students.length;
-    const totalRecords = records.length;
+    const count = (status, list = records) =>
+      list.filter((r) => r.status === status).length;
 
-    const present = records.filter(
-      (record) => record.status === "Present"
-    ).length;
+    const absenceMap = {};
 
-    const absent = records.filter(
-      (record) => record.status === "Absent"
-    ).length;
+    records.filter((r) => r.status === "Absent").forEach((r) => {
+      const key = r.studentId;
 
-    const late = records.filter(
-      (record) => record.status === "Late"
-    ).length;
-
-    const attendanceRate =
-      totalRecords > 0
-        ? Math.round((present / totalRecords) * 100)
-        : 0;
-
-    const today = getTodayDate();
-
-    const todayRecords = records.filter(
-      (record) => record.date === today
-    );
-
-    const todayPresent = todayRecords.filter(
-      (record) => record.status === "Present"
-    ).length;
-
-    const todayAbsent = todayRecords.filter(
-      (record) => record.status === "Absent"
-    ).length;
-
-    const todayLate = todayRecords.filter(
-      (record) => record.status === "Late"
-    ).length;
-
-    const absenceCounts = {};
-
-    records
-      .filter((record) => record.status === "Absent")
-      .forEach((record) => {
-        const key = record.studentId;
-
-        if (!absenceCounts[key]) {
-          absenceCounts[key] = {
-            studentId: record.studentId,
-            name: record.name || "Unknown Student",
-            absences: 0,
-          };
-        }
-
-        absenceCounts[key].absences += 1;
-      });
-
-    const studentsWithMostAbsences = Object.values(absenceCounts)
-      .sort((a, b) => b.absences - a.absences)
-      .slice(0, 5);
-
-    const insights = [];
-
-    if (totalRecords === 0) {
-      insights.push(
-        "No attendance records yet. Start recording attendance to see your analysis."
-      );
-    } else {
-      insights.push(
-        `The overall Present rate is ${attendanceRate}% based on all attendance records.`
-      );
-
-      if (absent > present) {
-        insights.push(
-          "There are more Absent records than Present records. Review attendance patterns."
-        );
+      if (!absenceMap[key]) {
+        absenceMap[key] = {
+          studentId: r.studentId,
+          name: r.name || r.studentId,
+          absences: 0,
+        };
       }
 
-      if (late > 0) {
-        insights.push(
-          `There are ${late} Late records. Consider reminding students to arrive on time.`
-        );
-      }
+      absenceMap[key].absences++;
+    });
 
-      if (studentsWithMostAbsences.length > 0) {
-        const topStudent = studentsWithMostAbsences[0];
-
-        insights.push(
-          `${topStudent.name} has the most recorded absences (${topStudent.absences}). Consider checking in with this student.`
-        );
-      }
-    }
+    const todayRecords = records.filter((r) => r.date === today);
+    const present = count("Present");
+    const absent = count("Absent");
+    const late = count("Late");
 
     res.json({
-      totalStudents,
-      totalRecords,
+      totalStudents: students.length,
+      totalRecords: records.length,
       present,
       absent,
       late,
-      attendanceRate,
+      attendanceRate: records.length
+        ? Math.round((present / records.length) * 100)
+        : 0,
       today,
       todayRecords,
-      todayPresent,
-      todayAbsent,
-      todayLate,
-      studentsWithMostAbsences,
-      insights,
+      todayPresent: count("Present", todayRecords),
+      todayAbsent: count("Absent", todayRecords),
+      todayLate: count("Late", todayRecords),
+      studentsWithMostAbsences: Object.values(absenceMap)
+        .sort((a, b) => b.absences - a.absences)
+        .slice(0, 5),
+      insights: [
+        records.length
+          ? `There are ${records.length} attendance records in total.`
+          : "No attendance records yet. Start recording attendance to see analysis.",
+        `Present: ${present}, Absent: ${absent}, Late: ${late}.`,
+      ],
     });
-  } catch (error) {
-    console.error("AI analysis error:", error);
+  } catch (err) {
+    console.error("Analysis error:", err.message);
     res.status(500).json({
-      message: "Failed to analyze attendance data.",
+      message: "Could not analyze attendance.",
     });
   }
 });
 
-// ===============================
-// AI CHATBOT
-// Rule-based assistant; no API key
-// ===============================
+// ================= AI CHATBOT =================
+// Rule-based chatbot; no API key required.
 
 app.post("/api/ai/chat", async (req, res) => {
   try {
-    const question = String(req.body.question || "")
-      .trim()
-      .toLowerCase();
+    const question = String(req.body.question || "").toLowerCase().trim();
 
     if (!question) {
       return res.status(400).json({
-        answer: "Please type a question first.",
+        answer: "Please type a question.",
       });
     }
 
     const students = await Student.find().sort({ name: 1 });
     const records = await Attendance.find();
+    const today = getToday();
 
-    const today = getTodayDate();
+    const count = (status) =>
+      records.filter((r) => r.status === status).length;
 
-    const present = records.filter(
-      (record) => record.status === "Present"
-    ).length;
-
-    const absent = records.filter(
-      (record) => record.status === "Absent"
-    ).length;
-
-    const late = records.filter(
-      (record) => record.status === "Late"
-    ).length;
-
-    const todayRecords = records.filter(
-      (record) => record.date === today
+    const todayAbsent = records.filter(
+      (r) => r.date === today && r.status === "Absent"
     );
 
-    const todayAbsent = todayRecords.filter(
-      (record) => record.status === "Absent"
-    );
+    const absentMap = {};
 
-    const absenceCounts = {};
+    records.filter((r) => r.status === "Absent").forEach((r) => {
+      const key = r.studentId;
 
-    records
-      .filter((record) => record.status === "Absent")
-      .forEach((record) => {
-        const key = record.studentId;
+      if (!absentMap[key]) {
+        absentMap[key] = {
+          name: r.name || r.studentId,
+          absences: 0,
+        };
+      }
 
-        if (!absenceCounts[key]) {
-          absenceCounts[key] = {
-            studentId: record.studentId,
-            name: record.name || "Unknown Student",
-            absences: 0,
-          };
-        }
+      absentMap[key].absences++;
+    });
 
-        absenceCounts[key].absences += 1;
-      });
-
-    const mostAbsent = Object.values(absenceCounts).sort(
+    const mostAbsent = Object.values(absentMap).sort(
       (a, b) => b.absences - a.absences
     );
 
     let answer;
 
-    if (
-      question.includes("hello") ||
-      question.includes("hi") ||
-      question.includes("hey")
-    ) {
+    if (/hello|^hi\b|^hey\b/.test(question)) {
       answer =
-        "Hello! I'm your Class Attendance Assistant. Ask me about students, attendance, Present, Absent, Late, or attendance analysis.";
+        "Hello! I can help you check students and attendance. Ask me about your saved records.";
+    } else if (
+      question.includes("today") &&
+      (question.includes("absent") || question.includes("missing"))
+    ) {
+      answer = todayAbsent.length
+        ? `Students marked Absent today (${today}): ${todayAbsent
+            .map((r) => r.name || r.studentId)
+            .join(", ")}.`
+        : `There are no Absent records for today (${today}).`;
+    } else if (
+      question.includes("most absent") ||
+      question.includes("frequently absent") ||
+      question.includes("most absences")
+    ) {
+      answer = mostAbsent.length
+        ? "Students with the most recorded absences: " +
+          mostAbsent
+            .slice(0, 5)
+            .map((s, i) => `${i + 1}. ${s.name} (${s.absences})`)
+            .join("; ")
+        : "There are no Absent records yet.";
+    } else if (
+      question.includes("attendance rate") ||
+      question.includes("present rate")
+    ) {
+      const rate = records.length
+        ? Math.round((count("Present") / records.length) * 100)
+        : 0;
+
+      answer = `The overall Present rate is ${rate}% (${count(
+        "Present"
+      )} Present records out of ${records.length} records).`;
     } else if (
       question.includes("how many students") ||
       question.includes("total students") ||
       question.includes("number of students")
     ) {
-      answer = `There are ${students.length} students registered in the system.`;
-    } else if (
-      question.includes("today") &&
-      (question.includes("absent") || question.includes("missing"))
-    ) {
-      answer =
-        todayAbsent.length > 0
-          ? `Absent today (${today}): ${todayAbsent
-              .map((record) => record.name || record.studentId)
-              .join(", ")}.`
-          : `There are no Absent records for today (${today}).`;
-    } else if (
-      question.includes("most absent") ||
-      question.includes("frequently absent") ||
-      question.includes("many absences")
-    ) {
-      answer =
-        mostAbsent.length > 0
-          ? "Students with the most recorded absences: " +
-            mostAbsent
-              .slice(0, 5)
-              .map(
-                (student, index) =>
-                  `${index + 1}. ${student.name} (${student.absences} absences)`
-              )
-              .join("; ")
-          : "There are no Absent records yet.";
-    } else if (
-      question.includes("attendance rate") ||
-      question.includes("present rate")
-    ) {
-      const rate =
-        records.length > 0
-          ? Math.round((present / records.length) * 100)
-          : 0;
-
-      answer = `The overall Present rate is ${rate}% (${present} Present records out of ${records.length} total attendance records).`;
-    } else if (
-      question.includes("how many present") ||
-      question.includes("total present") ||
-      question.includes("present records")
-    ) {
-      answer = `There are ${present} Present attendance records.`;
-    } else if (
-      question.includes("how many absent") ||
-      question.includes("total absent") ||
-      question.includes("absent records")
-    ) {
-      answer = `There are ${absent} Absent attendance records.`;
-    } else if (
-      question.includes("how many late") ||
-      question.includes("total late") ||
-      question.includes("late records")
-    ) {
-      answer = `There are ${late} Late attendance records.`;
-    } else if (
-      question.includes("attendance records") ||
-      question.includes("total records")
-    ) {
-      answer = `There are ${records.length} attendance records in total.`;
+      answer = `There are ${students.length} registered students.`;
     } else if (
       question.includes("list students") ||
       question.includes("show students") ||
       question.includes("student names")
     ) {
-      answer =
-        students.length > 0
-          ? "Registered students: " +
-            students
-              .map((student) => `${student.name} (${student.studentId})`)
-              .join(", ")
-          : "No students have been registered yet.";
+      answer = students.length
+        ? "Registered students: " +
+          students.map((s) => `${s.name} (${s.studentId})`).join(", ")
+        : "No students registered yet.";
+    } else if (
+      question.includes("how many present") ||
+      question.includes("total present") ||
+      question.includes("present records")
+    ) {
+      answer = `There are ${count("Present")} Present records.`;
+    } else if (
+      question.includes("how many absent") ||
+      question.includes("total absent") ||
+      question.includes("absent records")
+    ) {
+      answer = `There are ${count("Absent")} Absent records.`;
+    } else if (
+      question.includes("how many late") ||
+      question.includes("total late") ||
+      question.includes("late records")
+    ) {
+      answer = `There are ${count("Late")} Late records.`;
+    } else if (
+      question.includes("attendance records") ||
+      question.includes("total records")
+    ) {
+      answer = `There are ${records.length} attendance records in total.`;
     } else if (question.includes("help")) {
       answer =
-        "Try asking: How many students? How many are Present? How many are Absent? Who is absent today? Who has the most absences? What is the attendance rate?";
+        "Try asking: How many students? How many are Present? Who is absent today? Who has the most absences? What is the attendance rate?";
     } else {
       answer =
-        "I can answer questions about your saved attendance data. Try: 'How many students?', 'How many are absent?', 'Who is absent today?', 'Who has the most absences?', or 'What is the attendance rate?'";
+        "I can answer questions about saved records. Try asking: How many students? How many are absent? Who is absent today? What is the attendance rate?";
     }
 
     res.json({ answer });
-  } catch (error) {
-    console.error("AI chatbot error:", error);
+  } catch (err) {
+    console.error("Chatbot error:", err.message);
     res.status(500).json({
-      answer: "Sorry, I could not process your question. Please try again.",
+      answer: "Sorry, the chatbot could not read the attendance data.",
     });
   }
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
+// Unknown API route
+app.use("/api", (req, res) => {
+  res.status(404).json({
+    message: "API route not found.",
+  });
 });
+
+// ================= START SERVER =================
+
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
+
+module.exports = app;
